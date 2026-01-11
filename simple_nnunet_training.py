@@ -6,9 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from pathlib import Path
-import SimpleITK as sitk
 from datetime import datetime
 import json
 from tqdm import tqdm
@@ -17,45 +16,18 @@ from tqdm import tqdm
 from dynamic_network_architectures.architectures.unet import PlainConvUNet
 from dynamic_network_architectures.building_blocks.helper import get_matching_instancenorm, convert_dim_to_conv_op
 
-LABELS = {
-    "background": 0,
-    "urinary_bladder": 1,
-    "bone_hips": 2,
-    "obturator_internus": 3,
-    "transition_zone_prostate": 4,
-    "central_zone_prostate": 5,
-    "rectum": 6,
-    "seminal_vesicles": 7,
-    "neurovascular_bundle": 8,
-}
+# Import dataset and utilities
+from dataset import (
+    MedicalImageDataset,
+    collate_fn_pad,
+    collate_fn_single,
+    get_network_downsampling_factor,
+    TARGET_SPACING,
+    LABELS
+)
 
 # Foreground labels only (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
-
-# Target spacing for resampling (median of dataset)
-TARGET_SPACING = (1.0, 1.0, 2.0)
-
-
-def resample_image(image, target_spacing, is_mask=False):
-    """Resample SimpleITK image to target spacing."""
-    original_spacing = image.GetSpacing()
-    original_size = image.GetSize()
-
-    new_size = [
-        int(round(original_size[i] * original_spacing[i] / target_spacing[i]))
-        for i in range(3)
-    ]
-
-    resampler = sitk.ResampleImageFilter()
-    resampler.SetOutputSpacing(target_spacing)
-    resampler.SetSize(new_size)
-    resampler.SetOutputDirection(image.GetDirection())
-    resampler.SetOutputOrigin(image.GetOrigin())
-    resampler.SetTransform(sitk.Transform())
-    resampler.SetDefaultPixelValue(0)
-    resampler.SetInterpolator(sitk.sitkNearestNeighbor if is_mask else sitk.sitkLinear)
-
-    return resampler.Execute(image)
 
 
 class DiceCELoss(nn.Module):
@@ -142,139 +114,6 @@ def calculate_dice_per_class(pred, target, num_classes, smooth=1e-5, include_bac
     return dice_scores
 
 
-class MedicalImageDataset(Dataset):
-    """Dataset for loading whole medical images and segmentation masks"""
-
-    def __init__(self, image_files, mask_files, target_spacing=TARGET_SPACING):
-        """
-        Args:
-            image_files: List of paths to image files
-            mask_files: List of paths to corresponding mask files
-            target_spacing: Target spacing (x, y, z) in mm for resampling
-        """
-        self.image_files = image_files
-        self.mask_files = mask_files
-        self.target_spacing = target_spacing
-        self.divisible_by = get_network_downsampling_factor()
-        assert len(image_files) == len(mask_files), "Mismatch between images and masks"
-
-    def __len__(self):
-        return len(self.image_files)
-
-    def normalize_image(self, image):
-        """Z-score normalization"""
-        mean = image.mean()
-        std = image.std()
-        if std > 0:
-            image = (image - mean) / std
-        return image
-
-    def __getitem__(self, idx):
-        # Load image and mask
-        image_sitk = sitk.ReadImage(str(self.image_files[idx]))
-        mask_sitk = sitk.ReadImage(str(self.mask_files[idx]))
-
-        # Resample to target spacing
-        image_sitk = resample_image(image_sitk, self.target_spacing, is_mask=False)
-        mask_sitk = resample_image(mask_sitk, self.target_spacing, is_mask=True)
-
-        image = sitk.GetArrayFromImage(image_sitk).astype(np.float32)
-        mask = sitk.GetArrayFromImage(mask_sitk).astype(np.int64)
-
-        # Store original shape before any modifications
-        original_shape = image.shape  # (D, H, W)
-
-        # Normalize image
-        image = self.normalize_image(image)
-
-        # Convert to tensors
-        image_tensor = torch.from_numpy(image).unsqueeze(0)  # (1, D, H, W)
-        mask_tensor = torch.from_numpy(mask).long()  # (D, H, W)
-
-        # Pad to be divisible by network downsampling factor
-        image_tensor, mask_tensor, _ = pad_to_divisible(
-            image_tensor, mask_tensor, self.divisible_by
-        )
-
-        return image_tensor, mask_tensor, original_shape
-
-
-def collate_fn_pad(batch):
-    """
-    Custom collate function to handle variable-sized images by padding to max size in batch.
-    Also handles the original_shape tuple returned by the dataset.
-    """
-    images, masks, original_shapes = zip(*batch)
-
-    # Find max dimensions in batch
-    max_d = max(img.shape[1] for img in images)
-    max_h = max(img.shape[2] for img in images)
-    max_w = max(img.shape[3] for img in images)
-
-    # Pad all images and masks to max size
-    padded_images = []
-    padded_masks = []
-
-    for img, mask in zip(images, masks):
-        d, h, w = img.shape[1], img.shape[2], img.shape[3]
-        pad_d = max_d - d
-        pad_h = max_h - h
-        pad_w = max_w - w
-
-        # Pad: F.pad expects (W_left, W_right, H_left, H_right, D_left, D_right)
-        img_padded = F.pad(img, (0, pad_w, 0, pad_h, 0, pad_d), mode='constant', value=0)
-        mask_padded = F.pad(mask, (0, pad_w, 0, pad_h, 0, pad_d), mode='constant', value=0)
-
-        padded_images.append(img_padded)
-        padded_masks.append(mask_padded)
-
-    return torch.stack(padded_images), torch.stack(padded_masks), original_shapes
-
-
-def collate_fn_single(batch):
-    """
-    Simple collate function for batch_size=1 that handles the original_shape.
-    """
-    images, masks, original_shapes = zip(*batch)
-    return torch.stack(images), torch.stack(masks), original_shapes
-
-
-def get_network_downsampling_factor():
-    """
-    Returns the total downsampling factor (D, H, W) for the network.
-    Images must be padded to be divisible by these factors.
-    """
-    return (4, 16, 16)
-
-
-def pad_to_divisible(image, mask, divisible_by=(4, 16, 16)):
-    """
-    Pad image and mask so dimensions are divisible by the given factors.
-
-    Args:
-        image: tensor of shape (C, D, H, W)
-        mask: tensor of shape (D, H, W)
-        divisible_by: tuple of (D_factor, H_factor, W_factor)
-
-    Returns:
-        padded_image, padded_mask, original_shape
-    """
-    d, h, w = image.shape[1], image.shape[2], image.shape[3]
-    d_factor, h_factor, w_factor = divisible_by
-
-    # Calculate padding needed
-    pad_d = (d_factor - d % d_factor) % d_factor
-    pad_h = (h_factor - h % h_factor) % h_factor
-    pad_w = (w_factor - w % w_factor) % w_factor
-
-    if pad_d > 0 or pad_h > 0 or pad_w > 0:
-        # F.pad expects (W_left, W_right, H_left, H_right, D_left, D_right)
-        image = F.pad(image, (0, pad_w, 0, pad_h, 0, pad_d), mode='constant', value=0)
-        mask = F.pad(mask, (0, pad_w, 0, pad_h, 0, pad_d), mode='constant', value=0)
-
-    return image, mask, (d, h, w)
-
-
 def unpad_output(output, original_shape):
     """
     Remove padding from network output to match original image shape.
@@ -359,11 +198,54 @@ def build_nnunet_network(num_input_channels=1, num_classes=9):
     return network
 
 
+class PolynomialLRScheduler:
+    """Polynomial learning rate scheduler: lr * (1 - epoch/max_epochs)^power"""
+
+    def __init__(self, optimizer, max_epochs, initial_lr, power=0.9):
+        self.optimizer = optimizer
+        self.max_epochs = max_epochs
+        self.initial_lr = initial_lr
+        self.power = power
+        self.current_epoch = 0
+
+    def step(self, epoch=None):
+        """Update learning rate based on current epoch"""
+        if epoch is not None:
+            self.current_epoch = epoch
+        else:
+            self.current_epoch += 1
+
+        # Calculate new learning rate: lr * (1 - epoch/max_epochs)^0.9
+        lr_multiplier = (1 - self.current_epoch / self.max_epochs) ** self.power
+        new_lr = self.initial_lr * lr_multiplier
+
+        # Update optimizer learning rate
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = new_lr
+
+    def state_dict(self):
+        """Return state for checkpoint saving"""
+        return {
+            'current_epoch': self.current_epoch,
+            'max_epochs': self.max_epochs,
+            'initial_lr': self.initial_lr,
+            'power': self.power
+        }
+
+    def load_state_dict(self, state_dict):
+        """Load state from checkpoint"""
+        self.current_epoch = state_dict.get('current_epoch', 0)
+        self.max_epochs = state_dict.get('max_epochs', self.max_epochs)
+        self.initial_lr = state_dict.get('initial_lr', self.initial_lr)
+        self.power = state_dict.get('power', self.power)
+
+
 class Trainer:
     """Training manager for nnUNet"""
 
     def __init__(self, model, train_loader, val_loader, test_loader, device, num_classes,
-                 learning_rate=1e-3, log_dir='logs', checkpoint_dir='checkpoints'):
+                 learning_rate=1e-3, log_dir='logs', checkpoint_dir='checkpoints',
+                 max_epochs=100, resume_checkpoint=None):
 
         self.model = model
         self.train_loader = train_loader
@@ -371,12 +253,19 @@ class Trainer:
         self.test_loader = test_loader
         self.device = device
         self.num_classes = num_classes
+        self.max_epochs = max_epochs
+        self.initial_lr = learning_rate
 
         self.criterion = DiceCELoss(num_classes=num_classes, ce_weight=1.0, dice_weight=1.0)
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=10
+
+        # Use polynomial LR scheduler instead of ReduceLROnPlateau
+        self.scheduler = PolynomialLRScheduler(
+            self.optimizer,
+            max_epochs=max_epochs,
+            initial_lr=learning_rate,
+            power=0.9
         )
 
         # Logging setup
@@ -397,6 +286,42 @@ class Trainer:
         }
 
         self.best_val_loss = float('inf')
+        self.start_epoch = 1
+
+        # Resume from checkpoint if specified
+        if resume_checkpoint is not None:
+            self.load_checkpoint(resume_checkpoint)
+
+    def load_checkpoint(self, checkpoint_path):
+        """Load model, optimizer, and scheduler state from checkpoint"""
+        checkpoint_path = Path(checkpoint_path)
+
+        if not checkpoint_path.exists():
+            print(f"Warning: Checkpoint {checkpoint_path} not found. Starting from scratch.")
+            return
+
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+
+        # Load optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        # Load scheduler state
+        if 'scheduler_state_dict' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        # Resume from next epoch
+        self.start_epoch = checkpoint['epoch'] + 1
+
+        # Load best validation loss if available
+        if 'val_loss' in checkpoint:
+            self.best_val_loss = checkpoint['val_loss']
+
+        print(f"Resumed from epoch {checkpoint['epoch']}")
+        print(f"Best validation loss so far: {self.best_val_loss:.4f}")
 
     def log_message(self, message):
         """Print and log message"""
@@ -630,13 +555,15 @@ class Trainer:
         self.log_message(f"Device: {self.device}")
         self.log_message(f"Number of classes: {self.num_classes}")
         self.log_message(f"Number of epochs: {num_epochs}")
+        self.log_message(f"Starting from epoch: {self.start_epoch}")
         self.log_message(f"Total parameters: {sum(p.numel() for p in self.model.parameters()):,}")
         self.log_message(f"Training samples: {len(self.train_loader.dataset)}")
         self.log_message(f"Validation samples: {len(self.val_loader.dataset)}")
         self.log_message(f"Test samples: {len(self.test_loader.dataset)}")
+        self.log_message(f"LR Scheduler: Polynomial (lr * (1 - epoch/max_epochs)^0.9)")
         self.log_message("=" * 80)
 
-        for epoch in range(1, num_epochs + 1):
+        for epoch in range(self.start_epoch, num_epochs + 1):
             self.log_message(f"\nEpoch {epoch}/{num_epochs}")
             self.log_message("-" * 80)
 
@@ -646,8 +573,8 @@ class Trainer:
             # Validation
             val_loss, val_ce, val_dice, dice_scores = self.validate_epoch(epoch)
 
-            # Scheduler step
-            self.scheduler.step(val_loss)
+            # Scheduler step (polynomial LR based on epoch)
+            self.scheduler.step(epoch)
 
             # Calculate mean foreground Dice
             valid_scores = [s for s in dice_scores.values() if not np.isnan(s)]
@@ -690,11 +617,13 @@ class Trainer:
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 checkpoint_path = self.checkpoint_dir / 'best_model.pth'
+                scheduler_state = self.scheduler.state_dict()
+                scheduler_state['current_epoch'] = epoch
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'scheduler_state_dict': scheduler_state,
                     'val_loss': val_loss,
                     'dice_scores': dice_scores,
                     'mean_foreground_dice': mean_foreground_dice
@@ -704,11 +633,13 @@ class Trainer:
             # Save checkpoint every 10 epochs
             if epoch % 10 == 0:
                 checkpoint_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pth'
+                scheduler_state = self.scheduler.state_dict()
+                scheduler_state['current_epoch'] = epoch
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'scheduler_state_dict': scheduler_state,
                     'val_loss': val_loss
                 }, checkpoint_path)
                 self.log_message(f"  Checkpoint saved: {checkpoint_path}")
@@ -722,7 +653,7 @@ class Trainer:
         best_checkpoint = self.checkpoint_dir / 'best_model.pth'
         if best_checkpoint.exists():
             self.log_message("\nLoading best model for test evaluation...")
-            checkpoint = torch.load(best_checkpoint, map_location=self.device)
+            checkpoint = torch.load(best_checkpoint, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'])
 
         test_results = self.test()
@@ -803,6 +734,8 @@ def main():
     learning_rate = 1e-3
     num_workers = 0  # Set to 0 on Windows to avoid multiprocessing issues
 
+    resume_from = Path("checkpoints/best_model.pth") if Path("checkpoints/best_model.pth").exists() else None
+
     # Data split ratios
     train_ratio = 0.7
     val_ratio = 0.15
@@ -811,6 +744,11 @@ def main():
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+
+    if resume_from:
+        print(f"Will resume training from: {resume_from}")
+    else:
+        print("Starting training from scratch")
 
     # Prepare data
     print("\nPreparing data...")
@@ -826,13 +764,25 @@ def main():
         print("Error: Not enough data for training/validation/testing!")
         return
 
-    # Create datasets (whole images, no patches)
-    train_dataset = MedicalImageDataset(train_images, train_masks)
-    val_dataset = MedicalImageDataset(val_images, val_masks)
-    test_dataset = MedicalImageDataset(test_images, test_masks)
+    # Training dataset WITH augmentation
+    elastic_params = {
+        'alpha_range': (0, 1000),    # Deformation strength
+        'sigma_range': (9, 13),       # Smoothness (B-spline-like)
+        'p': 0.5                      # 50% probability of applying deformation
+    }
 
-    # Create dataloaders with custom collate function for variable sizes
-    # Use collate_fn_single for batch_size=1, collate_fn_pad for larger batches
+    train_dataset = MedicalImageDataset(
+        train_images,
+        train_masks,
+        augment=True,
+        elastic_params=elastic_params
+    )
+
+    # Validation and test datasets WITHOUT augmentation
+    val_dataset = MedicalImageDataset(val_images, val_masks, augment=False)
+    test_dataset = MedicalImageDataset(test_images, test_masks, augment=False)
+
+
     collate_fn = collate_fn_single if batch_size == 1 else collate_fn_pad
 
     train_loader = DataLoader(
@@ -876,7 +826,9 @@ def main():
         test_loader=test_loader,
         device=device,
         num_classes=num_classes,
-        learning_rate=learning_rate
+        learning_rate=learning_rate,
+        max_epochs=num_epochs,
+        resume_checkpoint=resume_from
     )
 
     # Start training
