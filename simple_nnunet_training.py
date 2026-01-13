@@ -27,7 +27,7 @@ from dataset import (
 )
 
 # Import loss function
-from losses import DiceCELoss
+from losses import DiceCELoss, compute_weighted_dice_score
 
 # Foreground labels only (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
@@ -213,9 +213,8 @@ class Trainer:
 
         self.criterion = DiceCELoss(num_classes=num_classes, weight_matrix=weight_matrix, ce_weight=1.0, dice_weight=1.0)
 
-        # Store weighted dice score calculator for metrics
-        from losses import WeightedDiceScore
-        self.weighted_dice_metric = WeightedDiceScore(weight_matrix=weight_matrix)
+        # Store weight matrix for validation metrics
+        self.weight_matrix = weight_matrix
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -388,14 +387,18 @@ class Trainer:
                         if not np.isnan(score):
                             all_dice_scores[class_name].append(score)
 
-                # Calculate weighted dice scores on unpadded outputs
-                for i in range(outputs.shape[0]):
+                # Calculate weighted dice scores using compute_weighted_dice_score
+                for i in range(predictions.shape[0]):
                     orig_shape = original_shapes[i]
-                    output_unpadded = outputs[i:i+1, :, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
-                    mask_unpadded = masks[i:i+1, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
 
-                    pred_softmax = F.softmax(output_unpadded, dim=1)
-                    weighted_scores = self.weighted_dice_metric(pred_softmax, mask_unpadded)
+                    weighted_scores = compute_weighted_dice_score(
+                        pred_unpadded,
+                        mask_unpadded,
+                        self.weight_matrix,
+                        num_classes=self.num_classes
+                    )
                     all_weighted_dice_scores.append(weighted_scores.cpu())
 
                 # Update progress bar
@@ -481,14 +484,18 @@ class Trainer:
                         if not np.isnan(score):
                             all_dice_scores[class_name].append(score)
 
-                # Calculate weighted dice scores on unpadded outputs
-                for i in range(outputs.shape[0]):
+                # Calculate weighted dice scores using compute_weighted_dice_score
+                for i in range(predictions.shape[0]):
                     orig_shape = original_shapes[i]
-                    output_unpadded = outputs[i:i+1, :, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
-                    mask_unpadded = masks[i:i+1, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
 
-                    pred_softmax = F.softmax(output_unpadded, dim=1)
-                    weighted_scores = self.weighted_dice_metric(pred_softmax, mask_unpadded)
+                    weighted_scores = compute_weighted_dice_score(
+                        pred_unpadded,
+                        mask_unpadded,
+                        self.weight_matrix,
+                        num_classes=self.num_classes
+                    )
                     all_weighted_dice_scores.append(weighted_scores.cpu())
 
                 progress_bar.set_postfix({
