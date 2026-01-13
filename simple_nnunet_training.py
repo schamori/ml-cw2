@@ -26,61 +26,11 @@ from dataset import (
     LABELS
 )
 
+# Import loss function
+from losses import DiceCELoss
+
 # Foreground labels only (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
-
-
-class DiceCELoss(nn.Module):
-    """Combined Dice Loss + Cross Entropy Loss"""
-
-    def __init__(self, num_classes, ce_weight=1.0, dice_weight=1.0, smooth=1e-5):
-        super(DiceCELoss, self).__init__()
-        self.num_classes = num_classes
-        self.ce_weight = ce_weight
-        self.dice_weight = dice_weight
-        self.smooth = smooth
-        self.ce_loss = nn.CrossEntropyLoss()
-
-    def dice_loss(self, pred, target):
-        """
-        Calculate Dice loss for all classes
-        pred: (B, C, D, H, W) - raw logits
-        target: (B, D, H, W) - class indices
-        """
-        # Convert logits to probabilities
-        pred_softmax = F.softmax(pred, dim=1)
-
-        # One-hot encode target
-        target_one_hot = F.one_hot(target, num_classes=self.num_classes)
-        target_one_hot = target_one_hot.permute(0, 4, 1, 2, 3).float()
-
-        # Calculate dice score per class
-        dice_scores = []
-        for class_idx in range(self.num_classes):
-            pred_class = pred_softmax[:, class_idx]
-            target_class = target_one_hot[:, class_idx]
-
-            intersection = (pred_class * target_class).sum()
-            union = pred_class.sum() + target_class.sum()
-
-            dice_score = (2.0 * intersection + self.smooth) / (union + self.smooth)
-            dice_scores.append(dice_score)
-
-        # Average dice loss (1 - dice score)
-        dice_loss = 1.0 - torch.stack(dice_scores).mean()
-
-        return dice_loss
-
-    def forward(self, pred, target):
-        """
-        pred: (B, C, D, H, W)
-        target: (B, D, H, W)
-        """
-        ce_loss = self.ce_loss(pred, target)
-        dice_loss = self.dice_loss(pred, target)
-        total_loss = self.ce_weight * ce_loss + self.dice_weight * dice_loss
-
-        return total_loss, ce_loss, dice_loss
 
 
 def calculate_dice_per_class(pred, target, num_classes, smooth=1e-5, include_background=False):
@@ -249,7 +199,7 @@ class Trainer:
     """Training manager for nnUNet"""
 
     def __init__(self, model, train_loader, val_loader, test_loader, device, num_classes,
-                 learning_rate=1e-3, log_dir='logs', checkpoint_dir='checkpoints',
+                 weight_matrix, learning_rate=1e-3, log_dir='logs', checkpoint_dir='checkpoints',
                  max_epochs=100, resume_checkpoint=None):
 
         self.model = model
@@ -261,7 +211,11 @@ class Trainer:
         self.max_epochs = max_epochs
         self.initial_lr = learning_rate
 
-        self.criterion = DiceCELoss(num_classes=num_classes, ce_weight=1.0, dice_weight=1.0)
+        self.criterion = DiceCELoss(num_classes=num_classes, weight_matrix=weight_matrix, ce_weight=1.0, dice_weight=1.0)
+
+        # Store weighted dice score calculator for metrics
+        from losses import WeightedDiceScore
+        self.weighted_dice_metric = WeightedDiceScore(weight_matrix=weight_matrix)
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -390,6 +344,7 @@ class Trainer:
         running_ce_loss = 0.0
         running_dice_loss = 0.0
         all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
+        all_weighted_dice_scores = []
 
         progress_bar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]")
 
@@ -433,6 +388,16 @@ class Trainer:
                         if not np.isnan(score):
                             all_dice_scores[class_name].append(score)
 
+                # Calculate weighted dice scores on unpadded outputs
+                for i in range(outputs.shape[0]):
+                    orig_shape = original_shapes[i]
+                    output_unpadded = outputs[i:i+1, :, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i:i+1, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+
+                    pred_softmax = F.softmax(output_unpadded, dim=1)
+                    weighted_scores = self.weighted_dice_metric(pred_softmax, mask_unpadded)
+                    all_weighted_dice_scores.append(weighted_scores.cpu())
+
                 # Update progress bar
                 progress_bar.set_postfix({
                     'loss': total_loss.item(),
@@ -452,7 +417,14 @@ class Trainer:
             else:
                 mean_dice_scores[class_name] = float('nan')
 
-        return avg_loss, avg_ce_loss, avg_dice_loss, mean_dice_scores
+        # Average weighted dice scores per class
+        mean_weighted_dice = torch.stack(all_weighted_dice_scores).mean(dim=0)
+        mean_weighted_dice_dict = {
+            f"{list(LABELS.keys())[i]}": mean_weighted_dice[i].item()
+            for i in range(self.num_classes)
+        }
+
+        return avg_loss, avg_ce_loss, avg_dice_loss, mean_dice_scores, mean_weighted_dice_dict
 
     def test(self):
         """Evaluate on test set"""
@@ -465,6 +437,7 @@ class Trainer:
         running_ce_loss = 0.0
         running_dice_loss = 0.0
         all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
+        all_weighted_dice_scores = []
 
         progress_bar = tqdm(self.test_loader, desc="Test")
 
@@ -508,6 +481,16 @@ class Trainer:
                         if not np.isnan(score):
                             all_dice_scores[class_name].append(score)
 
+                # Calculate weighted dice scores on unpadded outputs
+                for i in range(outputs.shape[0]):
+                    orig_shape = original_shapes[i]
+                    output_unpadded = outputs[i:i+1, :, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i:i+1, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+
+                    pred_softmax = F.softmax(output_unpadded, dim=1)
+                    weighted_scores = self.weighted_dice_metric(pred_softmax, mask_unpadded)
+                    all_weighted_dice_scores.append(weighted_scores.cpu())
+
                 progress_bar.set_postfix({
                     'loss': total_loss.item()
                 })
@@ -528,6 +511,14 @@ class Trainer:
         valid_scores = [s for s in mean_dice_scores.values() if not np.isnan(s)]
         mean_foreground_dice = np.mean(valid_scores) if valid_scores else float('nan')
 
+        # Average weighted dice scores per class
+        mean_weighted_dice = torch.stack(all_weighted_dice_scores).mean(dim=0)
+        mean_weighted_dice_dict = {
+            f"{list(LABELS.keys())[i]}": mean_weighted_dice[i].item()
+            for i in range(self.num_classes)
+        }
+        mean_weighted_dice_foreground = mean_weighted_dice[1:].mean().item()  # Exclude background (class 0)
+
         # Log results
         self.log_message(f"\nTest Results:")
         self.log_message(f"  Total Loss: {avg_loss:.4f} (CE: {avg_ce_loss:.4f}, Dice: {avg_dice_loss:.4f})")
@@ -539,13 +530,20 @@ class Trainer:
                 self.log_message(f"    {class_name:30s}: N/A (not present)")
         self.log_message(f"\n  Mean Foreground Dice: {mean_foreground_dice:.4f}")
 
+        self.log_message(f"\n  Weighted Dice Scores per Class:")
+        for class_name, score in mean_weighted_dice_dict.items():
+            self.log_message(f"    {class_name:30s}: {score:.4f}")
+        self.log_message(f"\n  Mean Weighted Foreground Dice: {mean_weighted_dice_foreground:.4f}")
+
         # Save test results
         test_results = {
             'total_loss': avg_loss,
             'ce_loss': avg_ce_loss,
             'dice_loss': avg_dice_loss,
             'dice_scores_per_class': mean_dice_scores,
-            'mean_foreground_dice': mean_foreground_dice
+            'mean_foreground_dice': mean_foreground_dice,
+            'weighted_dice_scores_per_class': mean_weighted_dice_dict,
+            'mean_weighted_foreground_dice': mean_weighted_dice_foreground
         }
         self.training_log['test_results'] = test_results
         self.save_log()
@@ -576,7 +574,7 @@ class Trainer:
             train_loss, train_ce, train_dice = self.train_epoch(epoch)
 
             # Validation
-            val_loss, val_ce, val_dice, dice_scores = self.validate_epoch(epoch)
+            val_loss, val_ce, val_dice, dice_scores, weighted_dice_scores = self.validate_epoch(epoch)
 
             # Scheduler step (polynomial LR based on epoch)
             self.scheduler.step(epoch)
@@ -584,6 +582,10 @@ class Trainer:
             # Calculate mean foreground Dice
             valid_scores = [s for s in dice_scores.values() if not np.isnan(s)]
             mean_foreground_dice = np.mean(valid_scores) if valid_scores else float('nan')
+
+            # Calculate mean weighted foreground Dice
+            weighted_foreground_scores = [weighted_dice_scores[k] for k in list(LABELS.keys())[1:]]  # Exclude background
+            mean_weighted_foreground_dice = np.mean(weighted_foreground_scores)
 
             # Log results
             epoch_log = {
@@ -598,7 +600,9 @@ class Trainer:
                     'ce_loss': val_ce,
                     'dice_loss': val_dice,
                     'dice_scores_per_class': dice_scores,
-                    'mean_foreground_dice': mean_foreground_dice
+                    'mean_foreground_dice': mean_foreground_dice,
+                    'weighted_dice_scores_per_class': weighted_dice_scores,
+                    'mean_weighted_foreground_dice': mean_weighted_foreground_dice
                 },
                 'learning_rate': self.optimizer.param_groups[0]['lr']
             }
@@ -618,6 +622,11 @@ class Trainer:
                     self.log_message(f"    {class_name:30s}: N/A (not present)")
             self.log_message(f"\n  Mean Foreground Dice: {mean_foreground_dice:.4f}")
 
+            self.log_message(f"\n  Weighted Dice Scores per Class:")
+            for class_name, score in weighted_dice_scores.items():
+                self.log_message(f"    {class_name:30s}: {score:.4f}")
+            self.log_message(f"\n  Mean Weighted Foreground Dice: {mean_weighted_foreground_dice:.4f}")
+
             # Save best model
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
@@ -631,7 +640,9 @@ class Trainer:
                     'scheduler_state_dict': scheduler_state,
                     'val_loss': val_loss,
                     'dice_scores': dice_scores,
-                    'mean_foreground_dice': mean_foreground_dice
+                    'mean_foreground_dice': mean_foreground_dice,
+                    'weighted_dice_scores': weighted_dice_scores,
+                    'mean_weighted_foreground_dice': mean_weighted_foreground_dice
                 }, checkpoint_path)
                 self.log_message(f"\n  *** New best model saved! Val Loss: {val_loss:.4f} ***")
 
@@ -739,7 +750,7 @@ def main():
     learning_rate = 1e-3
     num_workers = 0  # Set to 0 on Windows to avoid multiprocessing issues
 
-    resume_from = Path("checkpoints/best_model.pth") if Path("checkpoints/best_model.pth").exists() else None
+    resume_from = None
 
     # Data split ratios
     train_ratio = 0.7
@@ -779,7 +790,7 @@ def main():
     train_dataset = MedicalImageDataset(
         train_images,
         train_masks,
-        augment=True,
+        augment=False,
         elastic_params=elastic_params
     )
 
@@ -823,6 +834,21 @@ def main():
     model = build_nnunet_network(num_input_channels=1, num_classes=num_classes)
     model = model.to(device)
 
+    weight_matrix = torch.tensor(
+        [
+            [0.0, 0.10519691, 0.10519691, 0.50915302, 0.50915302, 0.20618593, 0.30717496, 0.35766948, 0.40816399],
+            [0.42426478, 0.0, 0.42426478, 2.05344152, 2.05344152, 0.83155896, 1.23885315, 1.44250024, 1.64614733],
+            [0.59555727, 0.59555727, 0.0, 2.8824972, 2.8824972, 1.16729226, 1.73902724, 2.02489473, 2.31076222],
+            [0.55470628, 0.55470628, 0.55470628, 0.0, 0.1899679, 0.73707547, 0.37233709, 1.01062925, 1.10181384],
+            [0.50556781, 0.50556781, 0.50556781, 0.17313966, 0.0, 0.67178189, 0.33935374, 0.921103, 1.00421004],
+            [0.30631317, 0.30631317, 0.30631317, 0.70913596, 0.70913596, 0.0, 0.50772456, 0.25596032, 0.30631317],
+            [0.35262971, 0.35262971, 0.35262971, 0.5253463, 0.5253463, 0.5253463, 0.0, 0.78442119, 0.87077949],
+            [1.30266683, 1.30266683, 1.30266683, 2.1651221, 2.1651221, 0.87143919, 1.73389446, 0.0, 0.33240464],
+            [1.97067681, 1.97067681, 1.97067681, 3.09011452, 3.09011452, 1.41095795, 2.53039567, 0.57137967, 0.0],
+        ],
+        dtype=torch.float32,
+    ).to(device)
+
     # Create trainer
     trainer = Trainer(
         model=model,
@@ -831,6 +857,7 @@ def main():
         test_loader=test_loader,
         device=device,
         num_classes=num_classes,
+        weight_matrix=weight_matrix,
         learning_rate=learning_rate,
         max_epochs=num_epochs,
         resume_checkpoint=resume_from
