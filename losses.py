@@ -2,7 +2,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def compute_weighted_dice_score(pred, target, weight_matrix, num_classes=3, epsilon=1e-6):
 
+    pred = pred.reshape(-1).long()
+    target = target.reshape(-1).long()
+
+    ids = target * num_classes + pred
+
+    cm = torch.bincount(ids, minlength=num_classes**2).reshape(num_classes, num_classes).t().float()
+
+    weighted_cm = cm * weight_matrix
+
+    tp = cm.diagonal()
+
+    fp = weighted_cm.sum(dim=1) # Summing across rows, where we always predict a particular class
+
+    fn = weighted_cm.sum(dim=0) # Summing across columns, where a particular class is always the target
+
+    score = (2 * tp) / (2 * tp + fp + fn + epsilon)
+
+    return score
 class WeightedDiceScore(nn.Module):
     def __init__(self, weight_matrix, epsilon=1e-6):
         super().__init__()
@@ -67,27 +86,54 @@ class WeightedDiceScore(nn.Module):
 
 
 class DiceCELoss(nn.Module):
-    """Combined Dice Loss + Cross Entropy Loss with Weighted Dice"""
+    """Combined Dice Loss + Cross Entropy Loss with optional Weighted Dice"""
 
-    def __init__(self, num_classes, weight_matrix, ce_weight=1.0, dice_weight=1.0):
+    def __init__(self, num_classes, weight_matrix, ce_weight=1.0, dice_weight=1.0, weighted=True, epsilon=1e-5):
         super(DiceCELoss, self).__init__()
         self.num_classes = num_classes
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
+        self.weighted = weighted
+        self.epsilon = epsilon
         self.ce_loss = nn.CrossEntropyLoss()
-        self.weighted_dice_score = WeightedDiceScore(weight_matrix)
+        if weighted:
+            self.weighted_dice_score = WeightedDiceScore(weight_matrix)
 
     def dice_loss(self, pred, target):
         """
-        Calculate Weighted Dice loss for all classes
+        Calculate Dice loss for all classes (weighted or normal)
         pred: (B, C, D, H, W) or (B, C, H, W) - raw logits
         target: (B, D, H, W) or (B, H, W) - class indices
         """
         # Convert logits to probabilities
         pred_softmax = F.softmax(pred, dim=1)
 
-        # Get weighted dice scores per class
-        dice_scores = self.weighted_dice_score(pred_softmax, target)
+        if self.weighted:
+            # Get weighted dice scores per class
+            dice_scores = self.weighted_dice_score(pred_softmax, target)
+        else:
+            # Calculate normal dice loss
+            # One-hot encode target
+            target_one_hot = F.one_hot(target, num_classes=self.num_classes)
+            # Move class dimension to position 1
+            if target.dim() == 3:  # 2D case: (B, H, W)
+                target_one_hot = target_one_hot.permute(0, 3, 1, 2).float()
+            else:  # 3D case: (B, D, H, W)
+                target_one_hot = target_one_hot.permute(0, 4, 1, 2, 3).float()
+
+            # Calculate dice score per class
+            dice_scores = []
+            for class_idx in range(self.num_classes):
+                pred_class = pred_softmax[:, class_idx]
+                target_class = target_one_hot[:, class_idx]
+
+                intersection = (pred_class * target_class).sum()
+                union = pred_class.sum() + target_class.sum()
+
+                dice_score = (2.0 * intersection + self.epsilon) / (union + self.epsilon)
+                dice_scores.append(dice_score)
+
+            dice_scores = torch.stack(dice_scores)
 
         # Average dice loss (1 - dice score)
         dice_loss = 1.0 - dice_scores.mean()
