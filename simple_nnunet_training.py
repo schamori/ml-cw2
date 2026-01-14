@@ -1,15 +1,13 @@
-import os
 
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+from datetime import datetime
+import json
+from pathlib import Path
+import random
+import os
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from pathlib import Path
-from datetime import datetime
-import json
 from tqdm import tqdm
 
 # Import nnUNet components
@@ -29,9 +27,24 @@ from dataset import (
 # Import loss function
 from losses import DiceCELoss, compute_weighted_dice_score
 
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 # Foreground labels only (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
 
+# Set seed for reproducability
+SEED = 42
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        # These might hurt performance though
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def calculate_dice_per_class(pred, target, num_classes, smooth=1e-5, include_background=False):
     """
@@ -217,7 +230,6 @@ class Trainer:
         self.weight_matrix = weight_matrix
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        self.scaler = torch.amp.GradScaler('cuda')
 
         # Use polynomial LR scheduler instead of ReduceLROnPlateau
         self.scheduler = PolynomialLRScheduler(
@@ -306,21 +318,18 @@ class Trainer:
 
             # Forward pass
             self.optimizer.zero_grad()
-            
-            with torch.amp.autocast('cuda'):
-                outputs = self.model(images)
+            outputs = self.model(images)
 
-                # Handle deep supervision (if enabled)
-                if isinstance(outputs, (list, tuple)):
-                    outputs = outputs[0]
+            # Handle deep supervision (if enabled)
+            if isinstance(outputs, (list, tuple)):
+                outputs = outputs[0]
 
-                # Calculate loss (on padded images - padding is zeros which is background)
-                total_loss, ce_loss, dice_loss = self.criterion(outputs, masks)
+            # Calculate loss (on padded images - padding is zeros which is background)
+            total_loss, ce_loss, dice_loss = self.criterion(outputs, masks)
 
             # Backward pass
-            self.scaler.scale(total_loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            total_loss.backward()
+            self.optimizer.step()
 
             # Update running losses
             running_loss += total_loss.item()
@@ -352,66 +361,65 @@ class Trainer:
         progress_bar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]")
 
         with torch.no_grad():
-            with torch.amp.autocast('cuda'):
-                for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
-                    images = images.to(self.device)
-                    masks = masks.to(self.device)
+            for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
+                images = images.to(self.device)
+                masks = masks.to(self.device)
 
-                    # Forward pass
-                    outputs = self.model(images)
+                # Forward pass
+                outputs = self.model(images)
 
-                    # Handle deep supervision
-                    if isinstance(outputs, (list, tuple)):
-                        outputs = outputs[0]
+                # Handle deep supervision
+                if isinstance(outputs, (list, tuple)):
+                    outputs = outputs[0]
 
-                    # Calculate loss (on padded data for consistency with training)
-                    total_loss, ce_loss, dice_loss = self.criterion(outputs, masks)
+                # Calculate loss (on padded data for consistency with training)
+                total_loss, ce_loss, dice_loss = self.criterion(outputs, masks)
 
-                    # Update running losses
-                    running_loss += total_loss.item()
-                    running_ce_loss += ce_loss.item()
-                    running_dice_loss += dice_loss.item()
+                # Update running losses
+                running_loss += total_loss.item()
+                running_ce_loss += ce_loss.item()
+                running_dice_loss += dice_loss.item()
 
-                    # Calculate Dice scores per class (excluding background)
-                    # Unpad predictions and masks to original size for accurate metrics
-                    predictions = torch.argmax(outputs, dim=1)
+                # Calculate Dice scores per class (excluding background)
+                # Unpad predictions and masks to original size for accurate metrics
+                predictions = torch.argmax(outputs, dim=1)
 
-                    for i in range(predictions.shape[0]):
-                        orig_shape = original_shapes[i]
-                        pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
-                        mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                for i in range(predictions.shape[0]):
+                    orig_shape = original_shapes[i]
+                    pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
 
-                        dice_scores = calculate_dice_per_class(
-                            pred_unpadded.unsqueeze(0),
-                            mask_unpadded.unsqueeze(0),
-                            self.num_classes,
-                            include_background=False
-                        )
+                    dice_scores = calculate_dice_per_class(
+                        pred_unpadded.unsqueeze(0),
+                        mask_unpadded.unsqueeze(0),
+                        self.num_classes,
+                        include_background=False
+                    )
 
-                        for class_name, score in dice_scores.items():
-                            if not np.isnan(score):
-                                all_dice_scores[class_name].append(score)
+                    for class_name, score in dice_scores.items():
+                        if not np.isnan(score):
+                            all_dice_scores[class_name].append(score)
 
-                        # Calculate weighted dice scores using compute_weighted_dice_score
-                        for i in range(predictions.shape[0]):
-                            orig_shape = original_shapes[i]
-                            pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
-                            mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                # Calculate weighted dice scores using compute_weighted_dice_score
+                for i in range(predictions.shape[0]):
+                    orig_shape = original_shapes[i]
+                    pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
 
-                            weighted_scores = compute_weighted_dice_score(
-                                pred_unpadded,
-                                mask_unpadded,
-                                self.weight_matrix,
-                                num_classes=self.num_classes
-                            )
-                            all_weighted_dice_scores.append(weighted_scores.cpu())
+                    weighted_scores = compute_weighted_dice_score(
+                        pred_unpadded,
+                        mask_unpadded,
+                        self.weight_matrix,
+                        num_classes=self.num_classes
+                    )
+                    all_weighted_dice_scores.append(weighted_scores.cpu())
 
-                    # Update progress bar
-                    progress_bar.set_postfix({
-                        'loss': total_loss.item(),
-                        'ce': ce_loss.item(),
-                        'dice': dice_loss.item()
-                    })
+                # Update progress bar
+                progress_bar.set_postfix({
+                    'loss': total_loss.item(),
+                    'ce': ce_loss.item(),
+                    'dice': dice_loss.item()
+                })
 
         avg_loss = running_loss / len(self.val_loader)
         avg_ce_loss = running_ce_loss / len(self.val_loader)
@@ -450,64 +458,62 @@ class Trainer:
         progress_bar = tqdm(self.test_loader, desc="Test")
 
         with torch.no_grad():
-            # Wrap the inference in autocast to match training precision
-            with torch.amp.autocast('cuda'):
-                for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
-                    images = images.to(self.device)
-                    masks = masks.to(self.device)
+            for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
+                images = images.to(self.device)
+                masks = masks.to(self.device)
 
-                    # Forward pass
-                    outputs = self.model(images)
+                # Forward pass
+                outputs = self.model(images)
 
-                    # Handle deep supervision
-                    if isinstance(outputs, (list, tuple)):
-                        outputs = outputs[0]
+                # Handle deep supervision
+                if isinstance(outputs, (list, tuple)):
+                    outputs = outputs[0]
 
-                    # Calculate loss
-                    total_loss, ce_loss, dice_loss = self.criterion(outputs, masks)
+                # Calculate loss
+                total_loss, ce_loss, dice_loss = self.criterion(outputs, masks)
 
-                    # Update running losses
-                    running_loss += total_loss.item()
-                    running_ce_loss += ce_loss.item()
-                    running_dice_loss += dice_loss.item()
+                # Update running losses
+                running_loss += total_loss.item()
+                running_ce_loss += ce_loss.item()
+                running_dice_loss += dice_loss.item()
 
-                    # Calculate Dice scores per class (excluding background)
-                    # Unpad predictions and masks to original size for accurate metrics
-                    predictions = torch.argmax(outputs, dim=1)
+                # Calculate Dice scores per class (excluding background)
+                # Unpad predictions and masks to original size for accurate metrics
+                predictions = torch.argmax(outputs, dim=1)
 
-                    for i in range(predictions.shape[0]):
-                        orig_shape = original_shapes[i]
-                        pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
-                        mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                for i in range(predictions.shape[0]):
+                    orig_shape = original_shapes[i]
+                    pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
 
-                        dice_scores = calculate_dice_per_class(
-                            pred_unpadded.unsqueeze(0),
-                            mask_unpadded.unsqueeze(0),
-                            self.num_classes,
-                            include_background=False
-                        )
+                    dice_scores = calculate_dice_per_class(
+                        pred_unpadded.unsqueeze(0),
+                        mask_unpadded.unsqueeze(0),
+                        self.num_classes,
+                        include_background=False
+                    )
 
-                        for class_name, score in dice_scores.items():
-                            if not np.isnan(score):
-                                all_dice_scores[class_name].append(score)
+                    for class_name, score in dice_scores.items():
+                        if not np.isnan(score):
+                            all_dice_scores[class_name].append(score)
 
-                    # Calculate weighted dice scores using compute_weighted_dice_score
-                    for i in range(predictions.shape[0]):
-                        orig_shape = original_shapes[i]
-                        pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
-                        mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                # Calculate weighted dice scores using compute_weighted_dice_score
+                for i in range(predictions.shape[0]):
+                    orig_shape = original_shapes[i]
+                    pred_unpadded = predictions[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
+                    mask_unpadded = masks[i, :orig_shape[0], :orig_shape[1], :orig_shape[2]]
 
-                        weighted_scores = compute_weighted_dice_score(
-                            pred_unpadded,
-                            mask_unpadded,
-                            self.weight_matrix,
-                            num_classes=self.num_classes
-                        )
-                        all_weighted_dice_scores.append(weighted_scores.cpu())
+                    weighted_scores = compute_weighted_dice_score(
+                        pred_unpadded,
+                        mask_unpadded,
+                        self.weight_matrix,
+                        num_classes=self.num_classes
+                    )
+                    all_weighted_dice_scores.append(weighted_scores.cpu())
 
-                    progress_bar.set_postfix({
-                        'loss': total_loss.item()
-                    })
+                progress_bar.set_postfix({
+                    'loss': total_loss.item()
+                })
 
         avg_loss = running_loss / len(self.test_loader)
         avg_ce_loss = running_ce_loss / len(self.test_loader)
@@ -757,8 +763,10 @@ def prepare_data_lists(data_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.1
 def main():
     """Main training function"""
 
+    set_seed(SEED)
+
     # Configuration
-    data_dir = Path(r"./7013610/data/data")
+    data_dir = Path(r"./data/data")
     batch_size = 1  # Use batch size 1 for whole images (variable sizes)
     num_epochs = 100
     learning_rate = 1e-3
