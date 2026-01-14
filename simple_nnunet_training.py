@@ -1,15 +1,13 @@
-import os
 
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+from datetime import datetime
+import json
+from pathlib import Path
+import random
+import os
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from pathlib import Path
-from datetime import datetime
-import json
 from tqdm import tqdm
 
 # Import nnUNet components
@@ -29,9 +27,24 @@ from dataset import (
 # Import loss function
 from losses import DiceCELoss, compute_weighted_dice_score
 
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 # Foreground labels only (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
 
+# Set seed for reproducability
+SEED = 42
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        # These might hurt performance though
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def calculate_dice_per_class(pred, target, num_classes, smooth=1e-5, include_background=False):
     """
@@ -749,6 +762,8 @@ def prepare_data_lists(data_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.1
 
 def main():
     """Main training function"""
+
+    set_seed(SEED)
 
     # Configuration
     data_dir = Path(r"./data/data")
