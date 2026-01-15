@@ -1,0 +1,6 @@
+matplotlib
+nnunetv2
+numpy
+requests
+simpleitk
+torch==2.7.1
