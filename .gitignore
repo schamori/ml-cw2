@@ -1,0 +1,7 @@
+*.nii
+*.pth
+*.json
+*.gz
+*.log
+*.zip
+*.txt
