@@ -14,7 +14,7 @@ from experiment import build_network, prepare_data_lists
 from dataset import MedicalImageDataset, LABELS, TARGET_SPACING
 
 
-WEIGHT_PATH = "checkpoints/training_new_non_weighted.pth"
+WEIGHT_PATH = "checkpoints/best_model.pth"
 # =============================================================================
 
 DATA_DIR = Path("./7013610/data/data")
