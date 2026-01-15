@@ -1,5 +1,5 @@
 """
-Evaluate predictions from both weighted and non-weighted models on the test set.
+Evaluate predictions from a model on the test set.
 Uses the same seed (42) and split ratios as training to identify test samples.
 """
 
@@ -23,8 +23,7 @@ TEST_RATIO = 0.15
 
 # Paths
 DATA_DIR = Path("./7013610/data/data")
-PRED_NON_WEIGHTED_DIR = Path("./predictions/training_new_non_weighted")
-PRED_WEIGHTED_DIR = Path("./predictions/training_new_weighted")
+PRED_DIR = Path("./predictions/training_new_non_weighted")
 
 # Foreground labels (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
@@ -262,24 +261,19 @@ def print_results(name, results):
 
 def main():
     print("=" * 70)
-    print("Prediction Evaluation: Non-Weighted vs Weighted Models")
+    print("Prediction Evaluation")
     print("=" * 70)
 
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Check prediction directories exist
-    if not PRED_NON_WEIGHTED_DIR.exists():
-        print(f"Error: Prediction directory not found: {PRED_NON_WEIGHTED_DIR}")
-        return
-    if not PRED_WEIGHTED_DIR.exists():
-        print(f"Error: Prediction directory not found: {PRED_WEIGHTED_DIR}")
+    # Check prediction directory exists
+    if not PRED_DIR.exists():
+        print(f"Error: Prediction directory not found: {PRED_DIR}")
         return
 
-    print(f"\nPrediction directories:")
-    print(f"  Non-weighted: {PRED_NON_WEIGHTED_DIR}")
-    print(f"  Weighted:     {PRED_WEIGHTED_DIR}")
+    print(f"\nPrediction directory: {PRED_DIR}")
 
     # Get test set using same seed and ratios as training
     print(f"\nLoading test set (seed={SEED}, split={TRAIN_RATIO}/{VAL_RATIO}/{TEST_RATIO})...")
@@ -297,7 +291,7 @@ def main():
         print("Falling back to using all predictions as test set...")
 
         # Fallback: use prediction files to infer test set
-        pred_files = sorted(PRED_NON_WEIGHTED_DIR.glob("*_pred.nii.gz"))
+        pred_files = sorted(PRED_DIR.glob("*_pred.nii.gz"))
         test_masks = []
         for pred_file in pred_files:
             # Convert prediction name to mask name
@@ -323,52 +317,15 @@ def main():
     )
     weight_matrix = torch.tensor(weight_matrix, dtype=torch.float32).to(device)
 
-    # Evaluate non-weighted model predictions
+    # Evaluate predictions
     print("\n" + "-" * 70)
-    results_non_weighted = evaluate_predictions(
-        PRED_NON_WEIGHTED_DIR,
+    results = evaluate_predictions(
+        PRED_DIR,
         test_masks,
         weight_matrix,
         device
     )
-    print_results("Non-Weighted Model", results_non_weighted)
-
-    # Evaluate weighted model predictions
-    print("\n" + "-" * 70)
-    results_weighted = evaluate_predictions(
-        PRED_WEIGHTED_DIR,
-        test_masks,
-        weight_matrix,
-        device
-    )
-    print_results("Weighted Model", results_weighted)
-
-    # Comparison summary
-    print("\n" + "=" * 70)
-    print("COMPARISON SUMMARY")
-    print("=" * 70)
-    print(f"\n{'Metric':<40} {'Non-Weighted':>15} {'Weighted':>15} {'Diff':>10}")
-    print("-" * 80)
-
-    nw_fg = results_non_weighted['mean_foreground_dice']
-    w_fg = results_weighted['mean_foreground_dice']
-    print(f"{'Mean Foreground Dice':<40} {nw_fg:>15.4f} {w_fg:>15.4f} {w_fg - nw_fg:>+10.4f}")
-
-    nw_wfg = results_non_weighted['mean_weighted_foreground_dice']
-    w_wfg = results_weighted['mean_weighted_foreground_dice']
-    nw_wfg_std = results_non_weighted['std_weighted_foreground_dice']
-    w_wfg_std = results_weighted['std_weighted_foreground_dice']
-    print(f"{'Mean Weighted Foreground Dice':<40} {nw_wfg:>15.4f} {w_wfg:>15.4f} {w_wfg - nw_wfg:>+10.4f}")
-    print(f"{'Std Weighted Foreground Dice':<40} {nw_wfg_std:>15.4f} {w_wfg_std:>15.4f} {w_wfg_std - nw_wfg_std:>+10.4f}")
-
-    print("\nPer-class comparison (Dice):")
-    print("-" * 80)
-    for class_name in FOREGROUND_LABELS.keys():
-        nw_score = results_non_weighted['dice_per_class'].get(class_name, float('nan'))
-        w_score = results_weighted['dice_per_class'].get(class_name, float('nan'))
-        if not np.isnan(nw_score) and not np.isnan(w_score):
-            diff = w_score - nw_score
-            print(f"  {class_name:<38} {nw_score:>15.4f} {w_score:>15.4f} {diff:>+10.4f}")
+    print_results("Model", results)
 
     print("\n" + "=" * 70)
     print("Evaluation complete!")
