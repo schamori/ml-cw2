@@ -1,140 +1,130 @@
 """
-Evaluation script to compute metrics for predictions against ground truth.
+Script to generate predictions from a model checkpoint.
 """
 
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import numpy as np
+import torch
 from pathlib import Path
 import SimpleITK as sitk
 
-from dataset import LABELS
+from simple_nnunet_training import build_nnunet_network, prepare_data_lists
+from dataset import MedicalImageDataset, LABELS, TARGET_SPACING
 
-# =============================================================================
-# CONFIGURATION - Specify your prediction directory here
-# =============================================================================
-PRED_DIR = "predictions/training_new_non_weighted"
+
+WEIGHT_PATH = "checkpoints/training_new_non_weighted.pth"
 # =============================================================================
 
 DATA_DIR = Path("./7013610/data/data")
+OUTPUT_DIR = Path("./predictions")
 
 
-def compute_dice_per_class(pred, gt, num_classes):
-    """Compute Dice score for each class."""
-    dice_scores = {}
-    for cls in range(num_classes):
-        pred_cls = (pred == cls)
-        gt_cls = (gt == cls)
+def load_model(checkpoint_path, device, num_classes=9):
+    """Load model from checkpoint."""
+    model = build_nnunet_network(num_input_channels=1, num_classes=num_classes)
+    model = model.to(device)
 
-        intersection = np.sum(pred_cls & gt_cls)
-        union = np.sum(pred_cls) + np.sum(gt_cls)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
 
-        if union == 0:
-            dice = 1.0 if intersection == 0 else 0.0
-        else:
-            dice = (2.0 * intersection) / union
-
-        dice_scores[cls] = dice
-
-    return dice_scores
+    return model
 
 
-def load_nifti(path):
-    """Load NIfTI file and return numpy array."""
-    img = sitk.ReadImage(str(path))
-    return sitk.GetArrayFromImage(img)
+def run_inference(model, dataset, device):
+    """Run inference on dataset and return predictions with file info."""
+    predictions = []
+
+    with torch.no_grad():
+        for idx in range(len(dataset)):
+            image, mask, original_shape = dataset[idx]
+            image = image.unsqueeze(0).to(device)  # Add batch dim
+
+            output = model(image)
+            if isinstance(output, (list, tuple)):
+                output = output[0]
+
+            pred = torch.argmax(output, dim=1).squeeze(0)  # Remove batch dim
+
+            # Unpad to original shape
+            d, h, w = original_shape
+            pred_unpadded = pred[:d, :h, :w].cpu()
+
+            predictions.append({
+                'prediction': pred_unpadded,
+                'original_shape': original_shape,
+                'file_path': dataset.image_files[idx]
+            })
+
+    return predictions
+
+
+def save_predictions(predictions, output_dir):
+    """Save predictions as NIfTI files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for pred_info in predictions:
+        pred_np = pred_info['prediction'].numpy().astype(np.uint8)
+        pred_sitk = sitk.GetImageFromArray(pred_np)
+        pred_sitk.SetSpacing(TARGET_SPACING)
+
+        # Save with same base name
+        base_name = pred_info['file_path'].stem.replace('_img', '_pred')
+        save_path = output_dir / f"{base_name}.nii.gz"
+        sitk.WriteImage(pred_sitk, str(save_path))
+
+    print(f"Saved {len(predictions)} predictions to {output_dir}")
 
 
 def main():
     print("=" * 80)
-    print("Prediction Evaluation")
+    print("Generating Predictions")
     print("=" * 80)
 
-    pred_dir = Path(PRED_DIR)
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
 
-    if not pred_dir.exists():
-        print(f"Error: Prediction directory not found: {PRED_DIR}")
+    # Check weight exists
+    weight_path = Path(WEIGHT_PATH)
+
+    if not weight_path.exists():
+        print(f"Error: Weight file not found: {WEIGHT_PATH}")
         return
 
-    print(f"\nPrediction directory: {PRED_DIR}")
+    print(f"\nWeight: {WEIGHT_PATH}")
 
-    # Find all prediction files
-    pred_files = sorted(pred_dir.glob("*_pred.nii.gz"))
-    print(f"Found {len(pred_files)} prediction files")
+    # Get test set
+    print("\nLoading test set...")
+    _, _, _, _, test_images, test_masks = prepare_data_lists(
+        DATA_DIR, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15
+    )
+    print(f"Test samples: {len(test_images)}")
 
-    if len(pred_files) == 0:
-        print("Error: No prediction files found!")
+    if len(test_images) == 0:
+        print("Error: No test images found!")
         return
 
-    # Find corresponding ground truth masks
+    # Create test dataset
+    test_dataset = MedicalImageDataset(test_images, test_masks, augment=False)
+
+    # Load model
+    print("\nLoading model...")
     num_classes = len(LABELS)
-    all_dice_scores = {cls: [] for cls in range(num_classes)}
+    model = load_model(weight_path, device, num_classes)
 
-    results = []
+    # Run inference
+    print("\nRunning inference...")
+    predictions = run_inference(model, test_dataset, device)
 
-    for pred_path in pred_files:
-        # Get corresponding mask file
-        base_name = pred_path.stem.replace('_pred', '_mask')
-        mask_path = DATA_DIR / f"{base_name}.nii.gz"
-
-        if not mask_path.exists():
-            print(f"Warning: Ground truth not found for {pred_path.name}, skipping...")
-            continue
-
-        # Load prediction and ground truth
-        pred = load_nifti(pred_path)
-        gt = load_nifti(mask_path)
-
-        # Compute dice scores per class
-        dice_scores = compute_dice_per_class(pred, gt, num_classes)
-
-        for cls, dice in dice_scores.items():
-            all_dice_scores[cls].append(dice)
-
-        # Mean dice (excluding background)
-        mean_dice = np.mean([dice_scores[c] for c in range(1, num_classes)])
-
-        results.append({
-            'file': pred_path.name,
-            'mean_dice': mean_dice,
-            'per_class': dice_scores
-        })
-
-    # Print per-file results
-    print("\n" + "-" * 80)
-    print("Per-file Results (Mean Dice excluding background)")
-    print("-" * 80)
-    print(f"{'File':<50} {'Mean Dice':<10}")
-    print("-" * 80)
-
-    for result in sorted(results, key=lambda x: x['mean_dice'], reverse=True):
-        print(f"{result['file']:<50} {result['mean_dice']:.4f}")
-
-    # Print per-class summary
-    print("\n" + "=" * 80)
-    print("Per-Class Dice Scores (averaged over all samples)")
-    print("=" * 80)
-    print(f"{'Class':<5} {'Label':<25} {'Mean Dice':<12} {'Std':<10}")
-    print("-" * 80)
-
-    class_means = []
-    for cls in range(num_classes):
-        if len(all_dice_scores[cls]) > 0:
-            mean_dice = np.mean(all_dice_scores[cls])
-            std_dice = np.std(all_dice_scores[cls])
-            label_name = LABELS.get(cls, f"Class {cls}")
-            print(f"{cls:<5} {label_name:<25} {mean_dice:.4f}       {std_dice:.4f}")
-            if cls > 0:  # Exclude background from overall mean
-                class_means.append(mean_dice)
-
-    # Overall summary
-    print("-" * 80)
-    print(f"\nOverall Mean Dice (excluding background): {np.mean(class_means):.4f}")
-    print(f"Overall Std Dice (excluding background):  {np.std(class_means):.4f}")
+    # Save predictions
+    output_dir = OUTPUT_DIR / weight_path.stem
+    save_predictions(predictions, output_dir)
 
     print("\n" + "=" * 80)
-    print("Evaluation complete!")
+    print("Done!")
     print("=" * 80)
 
 
