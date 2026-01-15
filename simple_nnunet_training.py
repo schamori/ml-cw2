@@ -1,15 +1,13 @@
-import os
 
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+from datetime import datetime
+import json
+from pathlib import Path
+import random
+import os
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from pathlib import Path
-from datetime import datetime
-import json
 from tqdm import tqdm
 
 # Import nnUNet components
@@ -28,10 +26,26 @@ from dataset import (
 
 # Import loss function
 from losses import DiceCELoss, compute_weighted_dice_score
+import weighted_matrices
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 # Foreground labels only (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}
 
+# Set seed for reproducability
+SEED = 42
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        # These might hurt performance though
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def calculate_dice_per_class(pred, target, num_classes, smooth=1e-5, include_background=False):
     """
@@ -750,14 +764,17 @@ def prepare_data_lists(data_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.1
 def main():
     """Main training function"""
 
+    set_seed(SEED)
+
     # Configuration
-    data_dir = Path(r"./7013610/data/data")
+    data_dir = Path(r"./data/data")
     batch_size = 1  # Use batch size 1 for whole images (variable sizes)
     num_epochs = 100
     learning_rate = 1e-3
     num_workers = 0  # Set to 0 on Windows to avoid multiprocessing issues
 
     resume_from = None
+    # resume_from = Path("checkpoints/best_model.pth") if Path("checkpoints/best_model.pth").exists() else None
 
     # Data split ratios
     train_ratio = 0.7
@@ -841,20 +858,39 @@ def main():
     model = build_nnunet_network(num_input_channels=1, num_classes=num_classes)
     model = model.to(device)
 
+    sens_matrix, dist_matrix = None, None
+    # if you don't want to use sens and dist, leave the not needed one as None 
+    sens_matrix = weighted_matrices.create_sens_matrix(weighted_matrices.SENSITIVITY_RANKINGS)
+    dist_matrix = weighted_matrices.create_dist_matrix(weighted_matrices.AVG_DISTANCES)
+    importance = 0.9
+    weight_matrix = weighted_matrices.create_weighted_matrix(sens_matrix=sens_matrix, dist_matrix=dist_matrix, sens_importance=importance)
+
+    # Comment out for the hard-coded matrix from before or delete if not needed anymore
+    # weight_matrix = [
+    #         [0.0, 0.10519691, 0.10519691, 0.50915302, 0.50915302, 0.20618593, 0.30717496, 0.35766948, 0.40816399],
+    #         [0.42426478, 0.0, 0.42426478, 2.05344152, 2.05344152, 0.83155896, 1.23885315, 1.44250024, 1.64614733],
+    #         [0.59555727, 0.59555727, 0.0, 2.8824972, 2.8824972, 1.16729226, 1.73902724, 2.02489473, 2.31076222],
+    #         [0.55470628, 0.55470628, 0.55470628, 0.0, 0.1899679, 0.73707547, 0.37233709, 1.01062925, 1.10181384],
+    #         [0.50556781, 0.50556781, 0.50556781, 0.17313966, 0.0, 0.67178189, 0.33935374, 0.921103, 1.00421004],
+    #         [0.30631317, 0.30631317, 0.30631317, 0.70913596, 0.70913596, 0.0, 0.50772456, 0.25596032, 0.30631317],
+    #         [0.35262971, 0.35262971, 0.35262971, 0.5253463, 0.5253463, 0.5253463, 0.0, 0.78442119, 0.87077949],
+    #         [1.30266683, 1.30266683, 1.30266683, 2.1651221, 2.1651221, 0.87143919, 1.73389446, 0.0, 0.33240464],
+    #         [1.97067681, 1.97067681, 1.97067681, 3.09011452, 3.09011452, 1.41095795, 2.53039567, 0.57137967, 0.0],
+    #     ],
+
     weight_matrix = torch.tensor(
-        [
-            [0.0, 0.10519691, 0.10519691, 0.50915302, 0.50915302, 0.20618593, 0.30717496, 0.35766948, 0.40816399],
-            [0.42426478, 0.0, 0.42426478, 2.05344152, 2.05344152, 0.83155896, 1.23885315, 1.44250024, 1.64614733],
-            [0.59555727, 0.59555727, 0.0, 2.8824972, 2.8824972, 1.16729226, 1.73902724, 2.02489473, 2.31076222],
-            [0.55470628, 0.55470628, 0.55470628, 0.0, 0.1899679, 0.73707547, 0.37233709, 1.01062925, 1.10181384],
-            [0.50556781, 0.50556781, 0.50556781, 0.17313966, 0.0, 0.67178189, 0.33935374, 0.921103, 1.00421004],
-            [0.30631317, 0.30631317, 0.30631317, 0.70913596, 0.70913596, 0.0, 0.50772456, 0.25596032, 0.30631317],
-            [0.35262971, 0.35262971, 0.35262971, 0.5253463, 0.5253463, 0.5253463, 0.0, 0.78442119, 0.87077949],
-            [1.30266683, 1.30266683, 1.30266683, 2.1651221, 2.1651221, 0.87143919, 1.73389446, 0.0, 0.33240464],
-            [1.97067681, 1.97067681, 1.97067681, 3.09011452, 3.09011452, 1.41095795, 2.53039567, 0.57137967, 0.0],
-        ],
+        weight_matrix,
         dtype=torch.float32,
     ).to(device)
+    print('\n##### Matrices #####')
+    print('Sensitivity matrix:')
+    print(sens_matrix)
+    print('\nDistance matrix:')
+    print(dist_matrix)
+    print('Sensitivity importance: ', importance)
+    print('\n Final weight matrix:')
+    print(weight_matrix)
+    print('\n\n')
 
     # Create trainer
     trainer = Trainer(
