@@ -17,7 +17,7 @@ from dataset import MedicalImageDataset, LABELS, TARGET_SPACING
 WEIGHT_PATH = "checkpoints/best_model.pth"
 # =============================================================================
 
-DATA_DIR = Path("./7013610/data/data")
+DATA_DIR = Path("./data")
 OUTPUT_DIR = Path("./predictions")
 
 

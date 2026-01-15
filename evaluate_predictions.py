@@ -22,8 +22,8 @@ VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 
 # Paths
-DATA_DIR = Path("./7013610/data/data")
-PRED_DIR = Path("./predictions/training_new_non_weighted")
+DATA_DIR = Path("./data")
+PRED_DIR = Path("./predictions/best_model")
 
 # Foreground labels (excluding background)
 FOREGROUND_LABELS = {k: v for k, v in LABELS.items() if k != "background"}

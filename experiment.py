@@ -391,7 +391,7 @@ def prepare_data_lists(data_dir, train_ratio=0.7, val_ratio=0.15, _test_ratio=0.
 def run_experiment(experiment_name, use_residual=True, weighted=True, ce_weight=1.0, dice_weight=1.0, num_epochs=100, use_sens=True, use_dist=True):
     set_seed(SEED)
 
-    data_dir = Path(r"./7013610/data/data")
+    data_dir = Path(r"./data")
     batch_size = 1
     learning_rate = 1e-3
     num_workers = 0
