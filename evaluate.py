@@ -8,7 +8,6 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import numpy as np
 import torch
 from pathlib import Path
-from tqdm import tqdm
 import SimpleITK as sitk
 
 from simple_nnunet_training import build_nnunet_network, prepare_data_lists
@@ -50,7 +49,7 @@ def run_inference(model, dataset, device):
     predictions = []
 
     with torch.no_grad():
-        for idx in tqdm(range(len(dataset)), desc="Running inference"):
+        for idx in range(len(dataset)):
             image, mask, original_shape = dataset[idx]
             image = image.unsqueeze(0).to(device)  # Add batch dim
 

@@ -8,7 +8,6 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 # Import nnUNet components
 from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet
@@ -310,9 +309,7 @@ class Trainer:
         running_ce_loss = 0.0
         running_dice_loss = 0.0
 
-        progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]")
-
-        for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
+        for images, masks, original_shapes in self.train_loader:
             images = images.to(self.device)
             masks = masks.to(self.device)
 
@@ -336,13 +333,6 @@ class Trainer:
             running_ce_loss += ce_loss.item()
             running_dice_loss += dice_loss.item()
 
-            # Update progress bar
-            progress_bar.set_postfix({
-                'loss': total_loss.item(),
-                'ce': ce_loss.item(),
-                'dice': dice_loss.item()
-            })
-
         avg_loss = running_loss / len(self.train_loader)
         avg_ce_loss = running_ce_loss / len(self.train_loader)
         avg_dice_loss = running_dice_loss / len(self.train_loader)
@@ -358,10 +348,8 @@ class Trainer:
         all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
         all_weighted_dice_scores = []
 
-        progress_bar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]")
-
         with torch.no_grad():
-            for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
+            for images, masks, original_shapes in self.val_loader:
                 images = images.to(self.device)
                 masks = masks.to(self.device)
 
@@ -414,13 +402,6 @@ class Trainer:
                     )
                     all_weighted_dice_scores.append(weighted_scores.cpu())
 
-                # Update progress bar
-                progress_bar.set_postfix({
-                    'loss': total_loss.item(),
-                    'ce': ce_loss.item(),
-                    'dice': dice_loss.item()
-                })
-
         avg_loss = running_loss / len(self.val_loader)
         avg_ce_loss = running_ce_loss / len(self.val_loader)
         avg_dice_loss = running_dice_loss / len(self.val_loader)
@@ -455,10 +436,8 @@ class Trainer:
         all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
         all_weighted_dice_scores = []
 
-        progress_bar = tqdm(self.test_loader, desc="Test")
-
         with torch.no_grad():
-            for batch_idx, (images, masks, original_shapes) in enumerate(progress_bar):
+            for images, masks, original_shapes in self.test_loader:
                 images = images.to(self.device)
                 masks = masks.to(self.device)
 
@@ -510,10 +489,6 @@ class Trainer:
                         num_classes=self.num_classes
                     )
                     all_weighted_dice_scores.append(weighted_scores.cpu())
-
-                progress_bar.set_postfix({
-                    'loss': total_loss.item()
-                })
 
         avg_loss = running_loss / len(self.test_loader)
         avg_ce_loss = running_ce_loss / len(self.test_loader)

@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from pathlib import Path
 import SimpleITK as sitk
-from tqdm import tqdm
 
 from dataset import LABELS, TARGET_SPACING, resample_image
 from losses import compute_weighted_dice_score
@@ -139,7 +138,7 @@ def evaluate_predictions(pred_dir, test_masks, weight_matrix, device):
     all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
     all_weighted_dice_scores = []
 
-    for mask_path in tqdm(test_masks, desc=f"Evaluating {pred_dir.name}"):
+    for mask_path in test_masks:
         # Get prediction file path
         # Mask: XXXXXX_mask.nii.gz -> Prediction: XXXXXX_pred.nii.gz
         base_name = mask_path.name.replace('_mask', '_pred')

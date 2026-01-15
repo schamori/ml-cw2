@@ -5,7 +5,6 @@ import numpy as np
 import torch
 from pathlib import Path
 import SimpleITK as sitk
-from tqdm import tqdm
 
 from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet
 from dynamic_network_architectures.building_blocks.helper import get_matching_instancenorm
@@ -191,7 +190,7 @@ def evaluate_test_set(data_dir, checkpoint_path):
     all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
 
     print("\nRunning inference on test set...")
-    for img_path, mask_path in tqdm(zip(test_images, test_masks), total=len(test_images)):
+    for img_path, mask_path in zip(test_images, test_masks):
         # Load and resample image
         img_sitk = sitk.ReadImage(str(img_path))
         img_sitk = resample_image(img_sitk, TARGET_SPACING, is_mask=False)

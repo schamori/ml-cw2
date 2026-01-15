@@ -8,7 +8,6 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet, PlainConvUNet
 from dynamic_network_architectures.building_blocks.helper import get_matching_instancenorm
@@ -196,8 +195,7 @@ class Trainer:
         running_ce_loss = 0.0
         running_dice_loss = 0.0
 
-        progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]")
-        for images, masks, _ in progress_bar:
+        for images, masks, _ in self.train_loader:
             images = images.to(self.device)
             masks = masks.to(self.device)
 
@@ -213,7 +211,6 @@ class Trainer:
             running_loss += total_loss.item()
             running_ce_loss += ce_loss.item()
             running_dice_loss += dice_loss.item()
-            progress_bar.set_postfix({'loss': total_loss.item(), 'ce': ce_loss.item(), 'dice': dice_loss.item()})
 
         return running_loss / len(self.train_loader), running_ce_loss / len(self.train_loader), running_dice_loss / len(self.train_loader)
 
@@ -223,9 +220,8 @@ class Trainer:
         all_dice_scores = {k: [] for k in FOREGROUND_LABELS.keys()}
         all_weighted_dice_scores = []
 
-        progress_bar = tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]")
         with torch.no_grad():
-            for images, masks, original_shapes in progress_bar:
+            for images, masks, original_shapes in self.val_loader:
                 images = images.to(self.device)
                 masks = masks.to(self.device)
 
@@ -264,7 +260,7 @@ class Trainer:
         all_weighted_dice_scores = []
 
         with torch.no_grad():
-            for _, (images, masks, original_shapes) in enumerate(tqdm(self.test_loader, desc="Test")):
+            for images, masks, original_shapes in self.test_loader:
                 images = images.to(self.device)
                 masks = masks.to(self.device)
 
@@ -392,7 +388,7 @@ def prepare_data_lists(data_dir, train_ratio=0.7, val_ratio=0.15, _test_ratio=0.
     return train_images, train_masks, val_images, val_masks, test_images, test_masks
 
 
-def run_experiment(experiment_name, use_residual=True, augment=True, weighted=True, ce_weight=1.0, dice_weight=1.0, num_epochs=100, use_sens=True, use_dist=True):
+def run_experiment(experiment_name, use_residual=True, weighted=True, ce_weight=1.0, dice_weight=1.0, num_epochs=100, use_sens=True, use_dist=True):
     set_seed(SEED)
 
     data_dir = Path(r"./7013610/data/data")
@@ -407,11 +403,9 @@ def run_experiment(experiment_name, use_residual=True, augment=True, weighted=Tr
         print("Error: No data found!")
         return None
 
-    elastic_params = {'alpha_range': (0, 1000), 'sigma_range': (9, 13), 'p': 0.5}
-
-    train_dataset = MedicalImageDataset(train_images, train_masks, augment=augment, elastic_params=elastic_params)
-    val_dataset = MedicalImageDataset(val_images, val_masks, augment=False)
-    test_dataset = MedicalImageDataset(test_images, test_masks, augment=False)
+    train_dataset = MedicalImageDataset(train_images, train_masks)
+    val_dataset = MedicalImageDataset(val_images, val_masks)
+    test_dataset = MedicalImageDataset(test_images, test_masks)
 
     collate_fn = collate_fn_single if batch_size == 1 else collate_fn_pad
 
@@ -451,22 +445,20 @@ def main():
     num_epochs = 100
     results = {}
 
-    # Experiment 1: ResidualEncoderUNet with weighted=True, augmentation, ce_weight=1.0
+    # Experiment 1: ResidualEncoderUNet with weighted=True, ce_weight=1.0
     results['resnet_weighted_ce1'] = run_experiment(
         experiment_name='resnet_weighted_ce1',
         use_residual=True,
-        augment=True,
         weighted=True,
         ce_weight=1.0,
         dice_weight=1.0,
         num_epochs=num_epochs
     )
 
-    # Experiment 2: ResidualEncoderUNet with weighted=True, augmentation, ce_weight=0 (dice only)
+    # Experiment 2: ResidualEncoderUNet with weighted=True, ce_weight=0 (dice only)
     results['resnet_weighted_ce0'] = run_experiment(
         experiment_name='resnet_weighted_ce0',
         use_residual=True,
-        augment=False,
         weighted=True,
         ce_weight=0.0,
         dice_weight=1.0,
@@ -477,7 +469,6 @@ def main():
     results['resnet_unweighted'] = run_experiment(
         experiment_name='resnet_unweighted',
         use_residual=True,
-        augment=True,
         weighted=False,
         ce_weight=1.0,
         dice_weight=1.0,
@@ -488,7 +479,6 @@ def main():
     results['resnet_sens_only'] = run_experiment(
         experiment_name='resnet_sens_only',
         use_residual=True,
-        augment=False,
         weighted=True,
         ce_weight=1.0,
         dice_weight=1.0,
@@ -501,7 +491,6 @@ def main():
     results['resnet_dist_only'] = run_experiment(
         experiment_name='resnet_dist_only',
         use_residual=True,
-        augment=False,
         weighted=True,
         ce_weight=1.0,
         dice_weight=1.0,
