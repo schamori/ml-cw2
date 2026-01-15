@@ -99,7 +99,7 @@ def main():
     # Get test set
     print("\nLoading test set...")
     _, _, _, _, test_images, test_masks = prepare_data_lists(
-        DATA_DIR, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15
+        DATA_DIR, train_ratio=0.7, val_ratio=0.15, _test_ratio=0.15
     )
     print(f"Test samples: {len(test_images)}")
 
