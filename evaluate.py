@@ -10,7 +10,7 @@ import torch
 from pathlib import Path
 import SimpleITK as sitk
 
-from simple_nnunet_training import build_nnunet_network, prepare_data_lists
+from experiment import build_nnunet_network, prepare_data_lists
 from dataset import MedicalImageDataset, LABELS, TARGET_SPACING
 
 
