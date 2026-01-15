@@ -8,7 +8,7 @@ from pathlib import Path
 import SimpleITK as sitk
 
 # Import nnUNet components
-from dynamic_network_architectures.architectures.unet import PlainConvUNet
+from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet
 from dynamic_network_architectures.building_blocks.helper import get_matching_instancenorm
 
 LABELS = {
@@ -95,7 +95,11 @@ def build_nnunet_network(num_input_channels=1, num_classes=9):
         [1, 2, 2],  # stage 4: downsample H,W only
     ]
 
-    n_conv_per_stage_encoder = [2, 2, 2, 2, 2]
+    # Residual architectures usually use 2 blocks per stage
+    # In ResidualEncoderUNet, these are blocks of (conv-norm-relu-conv-norm-relu) 
+    # with a skip connection.
+    n_blocks_per_stage = [2, 2, 2, 2, 2]
+
     n_conv_per_stage_decoder = [2, 2, 2, 2]
     num_stages = len(kernel_sizes)
 
@@ -104,14 +108,14 @@ def build_nnunet_network(num_input_channels=1, num_classes=9):
     max_features = 320
     features_per_stage = [min(base_features * 2 ** i, max_features) for i in range(num_stages)]
 
-    network = PlainConvUNet(
+    network = ResidualEncoderUNet(
         input_channels=num_input_channels,
         n_stages=num_stages,
         features_per_stage=features_per_stage,
         conv_op=conv_op,
         kernel_sizes=kernel_sizes,
         strides=strides,
-        n_conv_per_stage=n_conv_per_stage_encoder,
+        n_conv_per_stage=n_blocks_per_stage,
         num_classes=num_classes,
         n_conv_per_stage_decoder=n_conv_per_stage_decoder,
         conv_bias=True,
