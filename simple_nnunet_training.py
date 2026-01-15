@@ -879,7 +879,7 @@ def main():
     #     ],
 
     weight_matrix = torch.tensor(
-        [weight_matrix],
+        weight_matrix,
         dtype=torch.float32,
     ).to(device)
     print('\n##### Matrices #####')
