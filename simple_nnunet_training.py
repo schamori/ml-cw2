@@ -858,7 +858,10 @@ def main():
     model = model.to(device)
 
     sens_matrix, dist_matrix = None, None
-    # if you don't want to use sens and dist, leave the not needed one as None 
+    # Change these ones based on the experiments
+    # 1. Sens + Weighted: Leave as is
+    # 2. Sens-only: delete or comment the dist_matrix code below, so that it stays None
+    # 2. Dist-only: delete or comment the sens_matrix code below, so that it stays None
     sens_matrix = weighted_matrices.create_sens_matrix(weighted_matrices.SENSITIVITY_RANKINGS)
     dist_matrix = weighted_matrices.create_dist_matrix(weighted_matrices.AVG_DISTANCES)
     importance = 0.9
