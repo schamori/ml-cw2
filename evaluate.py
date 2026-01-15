@@ -10,7 +10,7 @@ import torch
 from pathlib import Path
 import SimpleITK as sitk
 
-from experiment import build_nnunet_network, prepare_data_lists
+from experiment import build_network, prepare_data_lists
 from dataset import MedicalImageDataset, LABELS, TARGET_SPACING
 
 
@@ -23,7 +23,7 @@ OUTPUT_DIR = Path("./predictions")
 
 def load_model(checkpoint_path, device, num_classes=9):
     """Load model from checkpoint."""
-    model = build_nnunet_network(num_input_channels=1, num_classes=num_classes)
+    model = build_network(num_input_channels=1, num_classes=num_classes)
     model = model.to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
